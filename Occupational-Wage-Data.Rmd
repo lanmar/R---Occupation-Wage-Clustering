@@ -1,0 +1,211 @@
+---
+title: "Occupational Wage Data"
+output: html_notebook
+---
+
+Objective: explore how the average salary amongst professions have changed over time.
+
+
+
+## Loading the libraries
+
+```{r}
+library(dendextend)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(cluster)
+```
+
+
+## Loading the data
+
+```{r}
+oes <- readRDS("oes.rds")
+str(oes)
+```
+
+22 Occupation Observations
+15 Measurements of Average Income from 2001-2016
+
+
+## Initial exploration of the data
+
+```{r}
+head(oes)
+summary(oes)
+```
+
+No NA values exist in the data.
+The variables within this data are comparable to one another and don't have to be scaled.
+There is no categorical variables within this data.
+
+
+## Hierarchical clustering: Occupation trees
+
+We will build a dendrogram of occupations based on their yearly average salaries and propose clusters using a height of 100,000.
+ 
+```{r}
+# Calculate euclidean distance between the occupations
+dist_oes <- dist(oes, method = "euclidean")
+
+# Generate an average linkage analysis 
+hc_oes <- hclust(dist_oes, method = "average")
+
+# Create a dendrogram object from the hclust variable
+dend_oes <- as.dendrogram(hc_oes)
+
+# Color branches by cluster formed from the cut at a height of 100000
+dend_colored <- color_branches(dend_oes, h = 100000)
+
+# Plot the colored dendrogram
+plot(dend_colored)
+```
+ 
+Based on the dendrogram it may be reasonable to start with the three clusters formed at a height of 100,000. The members of these clusters appear to be tightly grouped but different from one another. Let's continue this exploration.
+
+
+## Hierarchical clustering: Preparing for exploration
+
+Now we have created a potential clustering for the oes data, we want to explore these clusters with ggplot2. In order to do so, we will need to process the oes data matrix into a tidy data frame with each occupation assigned its cluster.
+
+```{r}
+# Use rownames_to_column to move the rownames into a column of the data frame
+df_oes <- rownames_to_column(as.data.frame(oes), var = 'occupation')
+
+# Create a cluster assignment vector at h = 100,000
+cut_oes <- cutree(hc_oes, h = 100000)
+
+# Generate the segmented oes dataframe
+clust_oes <- mutate(df_oes, cluster = cut_oes)
+
+# Create a tidy data frame by gathering the year and values into two columns
+gathered_oes <- gather(data = clust_oes, 
+                       key = year, 
+                       value = mean_salary, 
+                       -occupation, -cluster)
+
+head(gathered_oes)
+tail(gathered_oes)
+```
+
+
+
+## Hierarchical clustering: Plotting occupational clusters
+
+Now we can explore the results of this hierarchical clustering work. 
+
+```{r}
+# View the clustering assignments by sorting the cluster assignment vector
+sort(cut_oes)
+
+# Plot the relationship between mean_salary and year and color the lines by the assigned cluster
+ggplot(gathered_oes, aes(x = year, y = mean_salary, color = factor(cluster))) + 
+    geom_line(aes(group = occupation))
+```
+
+From this work it looks like both Management & Legal professions (cluster 1) experienced the most rapid growth in these 15 years. Let's see what we can get by exploring this data using k-means.
+
+
+## K-means: Elbow analysis
+
+We have used the dendrogram to propose a clustering that generated 3 trees. Now we will leverage the k-means elbow plot to propose the "best" number of clusters.
+
+```{r}
+# Use map_dbl to run many models with varying value of k (centers)
+tot_withinss <- map_dbl(1:10,  function(k){
+  model <- kmeans(x = oes, centers = k)
+  model$tot.withinss
+})
+
+# Generate a data frame containing both k and tot_withinss
+elbow_df <- data.frame(
+  k = 1:10,
+  tot_withinss = tot_withinss
+)
+
+# Plot the elbow plot
+ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:10)
+```
+
+The elbow analysis proposes a different value of k: 2 instead of 3, let's see what we can learn from Silhouette Width Analysis.
+
+
+## K-means: Average Silhouette Widths
+
+We use average silhouette widths to explore what the "best" value of k should be.
+
+```{r}
+# Use map_dbl to run many models with varying value of k
+sil_width <- map_dbl(2:10,  function(k){
+  model <- pam(oes, k = k)
+  model$silinfo$avg.width
+})
+
+# Generate a data frame containing both k and sil_width
+sil_df <- data.frame(
+  k = 2:10,
+  sil_width = sil_width
+)
+
+# Plot the relationship between k and sil_width
+ggplot(sil_df, aes(x = k, y = sil_width)) +
+  geom_line() +
+  scale_x_continuous(breaks = 2:10)
+```
+
+It seems that this analysis results in another value of k, this time 7 is the top contender (although 2 comes very close).
+
+
+## The "best" number of clusters
+
+We ran three different methods for finding the optimal number of clusters and their assignments and we arrived with three different answers.
+
+```{r}
+model_k2 <- kmeans(x = oes, centers = 2)
+model_k7 <- kmeans(x = oes, centers = 7)
+
+# Generate the segmented oes dataframe
+clust_oes <- mutate(df_oes, cluster_k3 = cut_oes, cluster_k2 = model_k2$cluster, cluster_k7 = model_k7$cluster)
+
+# Create a tidy data frame by gathering the year and values into two columns
+gathered_oes <- gather(data = clust_oes, 
+                       key = year, 
+                       value = mean_salary, 
+                       -occupation, -cluster_k3, -cluster_k2, -cluster_k7)
+
+# Plot the relationship between mean_salary and year and color the lines by the assigned clusters according to the 3 methods used
+ggplot(gathered_oes, aes(x = year, y = mean_salary, color = factor(cluster_k3))) + 
+    geom_line(aes(group = occupation)) +
+    ggtitle("Hierarchical Clustering: k = 3")
+
+ggplot(gathered_oes, aes(x = year, y = mean_salary, color = factor(cluster_k2))) + 
+    geom_line(aes(group = occupation)) +
+    ggtitle("K-means Clustering: k = 2")
+
+ggplot(gathered_oes, aes(x = year, y = mean_salary, color = factor(cluster_k7))) + 
+    geom_line(aes(group = occupation)) +
+    ggtitle("K-means Clustering: k = 7")
+```
+
+So... what is the "best" way to cluster the data ?
+All of the above are correct but the best way to cluster is highly dependent on how we would use this data after...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
